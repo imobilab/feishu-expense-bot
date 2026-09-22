@@ -2,6 +2,7 @@
 .git
 .gitignore
 runtime
+node_modules
 card-callback-setup.png
 media-upload-scope.png
 README.md

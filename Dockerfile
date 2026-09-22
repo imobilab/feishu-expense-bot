@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
 FROM ${NODE_IMAGE}
 
 ARG LARK_CLI_VERSION=1.0.96
@@ -15,7 +15,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --chown=node:node package.json ./
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev \
+    && npm cache clean --force
 COPY --chown=node:node src ./src
 COPY --chown=node:node docker-entrypoint.sh ./docker-entrypoint.sh
 

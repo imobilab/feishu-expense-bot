@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node src/bot.mjs",
-    "check": "node --check src/bot.mjs"
+    "check": "node --check src/bot.mjs && node --check src/recognition/index.mjs && node --check src/recognition/ocr.mjs && node --check src/recognition/vision.mjs && node --check src/recognition/merge.mjs && node --check src/recognition/schema.mjs && node --check src/providers/qwen.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "openai": "^7.20.0"
   }
 }

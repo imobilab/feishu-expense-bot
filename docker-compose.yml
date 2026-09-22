@@ -4,24 +4,25 @@ services:
       context: .
       args:
         LARK_CLI_VERSION: "1.0.96"
-        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
-
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-bookworm-slim}
     image: feishu-expense-bot:latest
     container_name: feishu-expense-bot
     restart: unless-stopped
-
     env_file:
       - path: .env
         required: false
-
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      RECOGNITION_MODE: ${RECOGNITION_MODE:-vision}
+      VISION_PROVIDER: ${VISION_PROVIDER:-qwen}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen2.5-vl-7b-instruct}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      OCR_ENGINE: ${OCR_ENGINE:-tesseract}
       OCR_LANG: ${OCR_LANG:-chi_sim+eng}
-
     volumes:
       - bot-data:/app/runtime
       - lark-cli-config:/home/node/.lark-cli
-
     init: true
 
 volumes:

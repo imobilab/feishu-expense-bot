@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
+
+import { initializeRecognition, recognizeExpense } from "./recognition/index.mjs";
 
 const ROOT = process.cwd();
 const RUNTIME = path.join(ROOT, "runtime");
@@ -9,12 +11,10 @@ const UPLOADS = path.join(RUNTIME, "uploads");
 const STATE_FILE = path.join(RUNTIME, "state.json");
 const SHARE_TOKEN = process.env.FEISHU_FORM_SHARE_TOKEN || "shrcnTHfdZFYP2lB11p07xvR1Cc";
 const BASE_TOKEN = process.env.FEISHU_BASE_TOKEN || "IruKbsT0VaMwZwsR2qecroHtnue";
-const OCR_SOURCE = path.join(ROOT, "src", "vision-ocr.m");
-const OCR_BINARY = path.join(RUNTIME, "vision-ocr");
-const OCR_LANG = process.env.OCR_LANG || "chi_sim+eng";
+const FORM_FIELD_NAMES = ["商品名称", "价格", "消费日期", "支付方式"];
 
 await mkdir(UPLOADS, { recursive: true });
-await ensureOcrBinary();
+await initializeRecognition();
 let state = await loadState();
 state.cards ||= {};
 
@@ -43,18 +43,6 @@ async function runJson(args) {
   const parsed = JSON.parse(result.stdout);
   if (!parsed.ok) throw new Error(parsed.error?.message || "lark-cli request failed");
   return parsed.data;
-}
-
-async function ensureOcrBinary() {
-  if (process.platform !== "darwin") return;
-  try {
-    await access(OCR_BINARY);
-    return;
-  } catch {}
-  await run("clang", [
-    "-fobjc-arc", OCR_SOURCE, "-o", OCR_BINARY,
-    "-framework", "Foundation", "-framework", "Vision",
-  ]);
 }
 
 async function loadState() {
@@ -116,55 +104,6 @@ async function downloadResource(event, key) {
     "--file-key", key, "--type", resourceType, "--output", relative, "--as", "bot",
   ]);
   return path.resolve(data.saved_path || relative);
-}
-
-async function recognize(imagePath) {
-  const { stdout } = process.platform === "darwin"
-    ? await run(OCR_BINARY, [imagePath])
-    : await run("tesseract", [imagePath, "stdout", "-l", OCR_LANG, "--psm", "6"]);
-  return stdout.trim();
-}
-
-function parseExpense(text) {
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const compact = lines.join(" ");
-  const dateMatch = compact.match(/(20\d{2})[年/.\-](\d{1,2})[月/.\-](\d{1,2})日?/);
-  const expenseDate = dateMatch
-    ? `${dateMatch[1]}-${dateMatch[2].padStart(2, "0")}-${dateMatch[3].padStart(2, "0")}`
-    : "";
-
-  const prioritized = [];
-  const amountRegex = /(?:¥|￥|RMB\s*)?\s*(\d{1,7}(?:\.\d{1,2})?)/gi;
-  for (const line of lines) {
-    if (/(实付|支付金额|合计|总计|价税合计|金额)/.test(line)) {
-      for (const match of line.matchAll(amountRegex)) prioritized.push(Number(match[1]));
-    }
-  }
-  const allAmounts = [...compact.matchAll(/(?:¥|￥)\s*(\d{1,7}(?:\.\d{1,2})?)/g)]
-    .map(match => Number(match[1]));
-  const validAmounts = [...prioritized, ...allAmounts].filter(n => Number.isFinite(n) && n > 0);
-  const price = validAmounts.length ? validAmounts[0] : null;
-
-  const payment = ["微信支付", "支付宝", "云闪付", "银行卡", "信用卡", "现金"]
-    .find(method => compact.includes(method)) || "";
-  const isInvoice = /(发票|税号|购买方|销售方|价税合计)/.test(compact);
-
-  const excluded = /(订单号|交易号|支付|合计|总计|金额|发票|税号|购买方|销售方|日期|时间|收款|商户|微信|支付宝|¥|￥|RMB)/;
-  const candidates = lines.filter(line =>
-    line.length >= 3 && line.length <= 60 && !excluded.test(line) && !/^\d[\d\s.:/-]*$/.test(line)
-  );
-  const product = candidates.sort((a, b) => b.length - a.length)[0] || "";
-
-  return {
-    fields: {
-      "商品名称": product,
-      "价格": price,
-      "消费日期": expenseDate,
-      "支付方式": payment,
-    },
-    kind: isInvoice ? "invoice" : "order",
-    ocrText: text,
-  };
 }
 
 function editCard(pending) {
@@ -280,7 +219,9 @@ function statusCard(status, detail, success = false) {
 async function submit(pending) {
   const missing = ["商品名称", "价格", "消费日期"].filter(name => !pending.fields[name]);
   if (missing.length) throw new Error(`缺少必填字段：${missing.join("、")}`);
-  const fields = Object.fromEntries(Object.entries(pending.fields).filter(([, value]) => value !== "" && value !== null));
+  const fields = Object.fromEntries(FORM_FIELD_NAMES
+    .map(name => [name, pending.fields[name]])
+    .filter(([, value]) => value !== "" && value !== null && value !== undefined));
   if (/^\d{4}-\d{2}-\d{2}$/.test(fields["消费日期"])) {
     fields["消费日期"] = `${fields["消费日期"]} 00:00:00`;
   }
@@ -301,16 +242,16 @@ async function handleImage(event) {
   const key = await getResourceKey(event);
   if (!key) throw new Error("没有从消息中找到图片标识");
   const filePath = await downloadResource(event, key);
-  const ocrText = await recognize(filePath);
-  if (!ocrText) throw new Error("图片中没有识别到文字");
-  const parsed = parseExpense(ocrText);
+  const parsed = await recognizeExpense(filePath);
   const pending = state.pending[event.sender_id] || {
     fields: { "商品名称": "", "价格": null, "消费日期": "", "支付方式": "" },
     attachments: { order: [], invoice: [] },
     sourceMessageIds: [],
   };
   for (const [keyName, value] of Object.entries(parsed.fields)) {
-    if (value !== "" && value !== null) pending.fields[keyName] = value;
+    if (value !== "" && value !== null && value !== undefined && value !== 0) {
+      pending.fields[keyName] = value;
+    }
   }
   pending.attachments[parsed.kind].push(filePath);
   pending.sourceMessageIds.push(event.message_id);
@@ -378,6 +319,7 @@ async function handleCardAction(event) {
   if (event.action_name !== "submit_expense") return;
   const form = parseFormValue(event.form_value);
   pending.fields = {
+    ...pending.fields,
     "商品名称": String(form.product || "").trim(),
     "价格": Number(String(form.price || "").replace(/[,，¥￥\s]/g, "")),
     "消费日期": String(form.expense_date || "").slice(0, 10),
