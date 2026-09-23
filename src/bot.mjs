@@ -175,8 +175,13 @@ function editCard(pending) {
               default_value: f["价格"] == null ? "" : String(f["价格"]),
             },
             {
+              tag: "markdown",
+              element_id: "expenseDateLabel",
+              content: "**消费日期（必选）**",
+              margin: "8px 0 0 0",
+            },
+            {
               tag: "date_picker", name: "expense_date", required: true, width: "fill",
-              label: { tag: "plain_text", content: "消费日期" },
               initial_date: date,
             },
             {
