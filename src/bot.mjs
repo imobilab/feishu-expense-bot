@@ -106,11 +106,22 @@ async function downloadResource(event, key) {
   return path.resolve(data.saved_path || relative);
 }
 
+function currentDate() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: process.env.TZ || "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 function editCard(pending) {
   const f = pending.fields;
   const orderCount = pending.attachments.order.length;
   const invoiceCount = pending.attachments.invoice.length;
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(f["消费日期"] || "") ? f["消费日期"] : undefined;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(f["消费日期"] || "") ? f["消费日期"] : currentDate();
   return {
     schema: "2.0",
     config: {
@@ -165,9 +176,8 @@ function editCard(pending) {
             },
             {
               tag: "date_picker", name: "expense_date", required: true, width: "fill",
-              ...(date
-                ? { initial_date: date }
-                : { placeholder: { tag: "plain_text", content: "请选择消费日期" } }),
+              label: { tag: "plain_text", content: "消费日期" },
+              initial_date: date,
             },
             {
               tag: "input", name: "payment", width: "fill",
@@ -253,6 +263,9 @@ async function handleImage(event) {
       pending.fields[keyName] = value;
     }
   }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(pending.fields["消费日期"] || "")) {
+    pending.fields["消费日期"] = currentDate();
+  }
   pending.attachments[parsed.kind].push(filePath);
   pending.sourceMessageIds.push(event.message_id);
   pending.updatedAt = new Date().toISOString();
@@ -322,7 +335,7 @@ async function handleCardAction(event) {
     ...pending.fields,
     "商品名称": String(form.product || "").trim(),
     "价格": Number(String(form.price || "").replace(/[,，¥￥\s]/g, "")),
-    "消费日期": String(form.expense_date || "").slice(0, 10),
+    "消费日期": String(form.expense_date || pending.fields["消费日期"] || currentDate()).slice(0, 10),
     "支付方式": String(form.payment || "").trim(),
   };
   if (!Number.isFinite(pending.fields["价格"]) || pending.fields["价格"] <= 0) {
