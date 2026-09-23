@@ -1,51 +1,72 @@
+import { classifyDocument } from "./classifier.mjs";
+import { parseInvoice } from "./invoice-parser.mjs";
 import { initializeOcr, recognizeExpenseWithOcr } from "./ocr.mjs";
-import { mergeRecognitionResults } from "./merge.mjs";
-import { recognizeExpenseWithVision } from "./vision.mjs";
+import { parseOrder } from "./order-parser.mjs";
 
 export function getRecognitionMode() {
-  return (process.env.RECOGNITION_MODE || "ocr").trim().toLowerCase();
+  return (process.env.RECOGNITION_MODE || "vision").trim().toLowerCase();
 }
 
 export async function initializeRecognition() {
   const mode = getRecognitionMode();
-  if (!["ocr", "vision", "hybrid"].includes(mode)) {
-    throw new Error(`不支持的 RECOGNITION_MODE：${mode}；可选值为 ocr、vision、hybrid`);
+  if (!["ocr", "vision"].includes(mode)) {
+    throw new Error(`不支持的 RECOGNITION_MODE：${mode}；可选值为 ocr、vision`);
   }
-  return initializeOcr();
+  if (mode === "vision" && (process.env.VISION_PROVIDER || "qwen").trim().toLowerCase() !== "qwen") {
+    throw new Error(`不支持的 VISION_PROVIDER：${process.env.VISION_PROVIDER}；当前仅支持 qwen`);
+  }
+  if (mode === "ocr") await initializeOcr();
 }
 
-async function visionWithOcrFallback(imagePath, options) {
-  try {
-    return await recognizeExpenseWithVision(imagePath, options);
-  } catch (error) {
-    console.warn(`[recognition] Vision 识别失败，回退 OCR：${error.message || error}`);
-    return recognizeExpenseWithOcr(imagePath);
-  }
+function legacyOrder(result) {
+  return {
+    documentType: "order",
+    order: {
+      product: result.fields["商品名称"] || "",
+      price: result.fields["价格"] || null,
+      expense_date: result.fields["消费日期"] || "",
+      payment_method: result.fields["支付方式"] || "",
+    },
+    raw: { ocrText: result.raw.ocrText, classifierResponse: "", parserResponse: "" },
+  };
 }
 
-async function recognizeHybrid(imagePath, options) {
-  const [ocr, vision] = await Promise.allSettled([
-    recognizeExpenseWithOcr(imagePath),
-    recognizeExpenseWithVision(imagePath, options),
-  ]);
-  if (ocr.status === "fulfilled" && vision.status === "fulfilled") {
-    return mergeRecognitionResults(ocr.value, vision.value);
+export async function parseDocumentAs(documentType, imagePath, options = {}) {
+  if (documentType === "order") {
+    const parsed = await parseOrder(imagePath, options);
+    return { documentType, ...parsed, raw: { classifierResponse: "", parserResponse: parsed.raw } };
   }
-  if (vision.status === "fulfilled") {
-    console.warn(`[recognition] Hybrid OCR 失败，仅使用 Vision：${ocr.reason?.message || ocr.reason}`);
-    return vision.value;
+  if (documentType === "invoice") {
+    const parsed = await parseInvoice(imagePath, options);
+    return { documentType, ...parsed, raw: { classifierResponse: "", parserResponse: parsed.raw } };
   }
-  if (ocr.status === "fulfilled") {
-    console.warn(`[recognition] Hybrid Vision 失败，仅使用 OCR：${vision.reason?.message || vision.reason}`);
-    return ocr.value;
-  }
-  throw new AggregateError([ocr.reason, vision.reason], "OCR 和 Vision 识别均失败");
+  throw new Error(`不能解析未知文档类型：${documentType}`);
 }
 
+export async function recognizeDocument(imagePath, options = {}) {
+  if (getRecognitionMode() === "ocr") return legacyOrder(await recognizeExpenseWithOcr(imagePath));
+  const classified = await classifyDocument(imagePath, options);
+  if (classified.documentType === "unknown") {
+    return { documentType: "unknown", raw: { classifierResponse: classified.raw, parserResponse: "" } };
+  }
+  const parsed = await parseDocumentAs(classified.documentType, imagePath, options);
+  parsed.raw.classifierResponse = classified.raw;
+  return parsed;
+}
+
+// Backward-compatible entrypoint for callers that only expect an order.
 export async function recognizeExpense(imagePath, options = {}) {
-  const mode = getRecognitionMode();
-  if (mode === "ocr") return recognizeExpenseWithOcr(imagePath);
-  if (mode === "vision") return visionWithOcrFallback(imagePath, options);
-  if (mode === "hybrid") return recognizeHybrid(imagePath, options);
-  throw new Error(`不支持的 RECOGNITION_MODE：${mode}；可选值为 ocr、vision、hybrid`);
+  const result = await recognizeDocument(imagePath, options);
+  if (result.documentType !== "order") throw new Error(`附件类型不是订单：${result.documentType}`);
+  return {
+    fields: {
+      "类别": "",
+      "商品名称": result.order.product,
+      "价格": result.order.price || 0,
+      "消费日期": result.order.expense_date,
+      "支付方式": result.order.payment_method,
+    },
+    kind: "order",
+    raw: { ocrText: result.raw.ocrText || "", visionResponse: result.raw.parserResponse || "" },
+  };
 }

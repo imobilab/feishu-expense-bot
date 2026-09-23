@@ -1,0 +1,27 @@
+export const ACTIONS = Object.freeze({
+  DOCUMENT_CHOOSE_ORDER: "document_choose_order",
+  DOCUMENT_CHOOSE_INVOICE: "document_choose_invoice",
+  DOCUMENT_CANCEL: "document_cancel",
+  ORDER_CONFIRM: "order_confirm",
+  ORDER_CANCEL: "order_cancel",
+  INVOICE_CONFIRM: "invoice_confirm",
+  INVOICE_EDIT_AGAIN: "invoice_edit_again",
+  INVOICE_CANCEL: "invoice_cancel",
+  INVOICE_SELECT_ORDER: "invoice_select_order",
+  INVOICE_CREATE_ORDER: "invoice_create_order",
+});
+
+export const STAGES = Object.freeze({
+  RECEIVED: "RECEIVED",
+  CLASSIFYING: "CLASSIFYING",
+  ORDER_REVIEW: "ORDER_REVIEW",
+  INVOICE_PARSING: "INVOICE_PARSING",
+  INVOICE_REVIEW: "INVOICE_REVIEW",
+  INVOICE_DUPLICATE_CHECK: "INVOICE_DUPLICATE_CHECK",
+  INVOICE_MATCHING: "INVOICE_MATCHING",
+  INVOICE_SELECT_ORDER: "INVOICE_SELECT_ORDER",
+  INVOICE_NO_MATCH: "INVOICE_NO_MATCH",
+  INVOICE_BINDING: "INVOICE_BINDING",
+  FINISHED: "FINISHED",
+  CANCELLED: "CANCELLED",
+});

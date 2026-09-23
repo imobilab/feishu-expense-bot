@@ -1,9 +1,20 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 
-import { initializeRecognition, recognizeExpense } from "./recognition/index.mjs";
+import { ACTIONS, STAGES } from "./actions.mjs";
+import { prepareVisualAttachment } from "./attachments.mjs";
+import {
+  alreadyHandledCard, candidateCard, cancelledCard, documentTypeCard, duplicateCard, expiredCard, finishedCard, invoiceReviewCard, noMatchCard,
+} from "./invoice/cards.mjs";
+import { createInvoiceRepository } from "./invoice/repository.mjs";
+import {
+  bindConfirmedInvoice, confirmedInvoiceFromForm, createOrderAndBind, DuplicateInvoiceError, matchConfirmedInvoice,
+} from "./invoice/workflow.mjs";
+import { orderFinishedCard, orderReviewCard } from "./order/cards.mjs";
+import { initializeRecognition, parseDocumentAs, recognizeDocument } from "./recognition/index.mjs";
+import { addWorkflow, linkCard, normalizeState, workflowForCard } from "./workflow-state.mjs";
 
 const ROOT = process.cwd();
 const RUNTIME = path.join(ROOT, "runtime");
@@ -11,12 +22,13 @@ const UPLOADS = path.join(RUNTIME, "uploads");
 const STATE_FILE = path.join(RUNTIME, "state.json");
 const SHARE_TOKEN = process.env.FEISHU_FORM_SHARE_TOKEN || "shrcnTHfdZFYP2lB11p07xvR1Cc";
 const BASE_TOKEN = process.env.FEISHU_BASE_TOKEN || "IruKbsT0VaMwZwsR2qecroHtnue";
+const TABLE_ID = process.env.FEISHU_TABLE_ID || "tblY8EcAIKPHLIIu";
 const FORM_FIELD_NAMES = ["商品名称", "价格", "消费日期", "支付方式"];
 
 await mkdir(UPLOADS, { recursive: true });
 await initializeRecognition();
-let state = await loadState();
-state.cards ||= {};
+let state = normalizeState(await loadState());
+let stateWrite = Promise.resolve();
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -31,10 +43,9 @@ function run(command, args, options = {}) {
     child.stderr.on("data", chunk => { stderr += chunk; });
     if (options.stdin) child.stdin.end(options.stdin);
     child.on("error", reject);
-    child.on("close", code => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${command} exited ${code}: ${stderr || stdout}`));
-    });
+    child.on("close", code => code === 0
+      ? resolve({ stdout, stderr })
+      : reject(new Error(`${command} exited ${code}: ${stderr || stdout}`)));
   });
 }
 
@@ -45,16 +56,39 @@ async function runJson(args) {
   return parsed.data;
 }
 
+const invoiceRepository = createInvoiceRepository({
+  runJson,
+  baseToken: BASE_TOKEN,
+  tableId: TABLE_ID,
+  invoiceNumberField: process.env.FEISHU_INVOICE_NUMBER_FIELD || "发票号码",
+  invoiceAttachmentField: process.env.FEISHU_INVOICE_ATTACHMENT_FIELD || "发票文件",
+});
+
 async function loadState() {
   try {
     return JSON.parse(await readFile(STATE_FILE, "utf8"));
   } catch {
-    return { processed: {}, pending: {} };
+    return { processed: {}, pending: {}, cards: {} };
   }
 }
 
 async function saveState() {
-  await writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+  const snapshot = JSON.stringify(state, null, 2);
+  const next = stateWrite.then(async () => {
+    const temporary = `${STATE_FILE}.tmp`;
+    await writeFile(temporary, snapshot);
+    await rename(temporary, STATE_FILE);
+  });
+  stateWrite = next.catch(() => {});
+  await next;
+}
+
+function currentDate() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: process.env.TZ || "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function findResourceKey(value) {
@@ -66,8 +100,7 @@ async function getResourceKey(event) {
   const direct = findResourceKey(event.content);
   if (direct) return direct;
   const data = await runJson([
-    "im", "+messages-mget", "--message-id", event.message_id,
-    "--as", "bot", "--no-reactions",
+    "im", "+messages-mget", "--message-id", event.message_id, "--as", "bot", "--no-reactions",
   ]);
   return findResourceKey(data);
 }
@@ -90,10 +123,22 @@ async function replyCard(messageId, card, suffix) {
 }
 
 async function updateCard(token, card) {
-  return runJson([
-    "api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
-    "--data", JSON.stringify({ token, card }),
-  ]);
+  const startedAt = Date.now();
+  try {
+    return await runJson([
+      "api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
+      "--data", JSON.stringify({ token, card }),
+    ]);
+  } finally {
+    console.log(`[card] update_duration_ms=${Date.now() - startedAt}`);
+  }
+}
+
+async function sendWorkflowCard(workflow, card, suffix) {
+  const sent = await replyCard(workflow.messageId, card, suffix);
+  linkCard(state, sent.message_id, workflow);
+  await saveState();
+  return sent;
 }
 
 async function downloadResource(event, key) {
@@ -106,146 +151,40 @@ async function downloadResource(event, key) {
   return path.resolve(data.saved_path || relative);
 }
 
-function currentDate() {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: process.env.TZ || "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
+function parseFormValue(raw) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  return JSON.parse(raw);
 }
 
-function editCard(pending) {
-  const f = pending.fields;
-  const orderCount = pending.attachments.order.length;
-  const invoiceCount = pending.attachments.invoice.length;
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(f["消费日期"] || "") ? f["消费日期"] : currentDate();
+function orderFromForm(form, fallback) {
+  const price = Number(String(form.price || "").replace(/[,，¥￥\s]/g, ""));
+  if (!Number.isFinite(price) || price <= 0) throw new Error("价格必须是大于 0 的数字");
+  const product = String(form.product || "").trim();
+  if (!product) throw new Error("商品名称不能为空");
   return {
-    schema: "2.0",
-    config: {
-      update_multi: true,
-      width_mode: "default",
-      summary: { content: "请检查 OCR 识别结果" },
-      style: {
-        text_size: {
-          caption: { default: "notation", pc: "notation", mobile: "notation" },
-        },
-      },
-    },
-    header: {
-      title: { tag: "plain_text", content: "报销识别结果" },
-      subtitle: { tag: "plain_text", content: "修改后确认入账" },
-      template: "blue",
-      icon: { tag: "standard_icon", token: "file-form_colorful" },
-      text_tag_list: [
-        { tag: "text_tag", text: { tag: "plain_text", content: "待确认" }, color: "yellow" },
-      ],
-    },
-    body: {
-      direction: "vertical",
-      padding: "12px 12px 20px 12px",
-      vertical_spacing: "12px",
-      elements: [
-        {
-          tag: "markdown",
-          element_id: "summary",
-          content: `**检查识别内容**\n<font color='grey'>已附带 ${orderCount} 张订单图片、${invoiceCount} 个发票文件</font>`,
-          text_size: "normal",
-        },
-        {
-          tag: "form",
-          name: "expense_form",
-          element_id: "expenseForm",
-          direction: "vertical",
-          vertical_spacing: "12px",
-          padding: "12px",
-          elements: [
-            {
-              tag: "input", name: "product", required: true, width: "fill",
-              label: { tag: "plain_text", content: "商品名称" },
-              placeholder: { tag: "plain_text", content: "请输入商品名称" },
-              default_value: String(f["商品名称"] || ""),
-            },
-            {
-              tag: "input", name: "price", required: true, width: "fill",
-              label: { tag: "plain_text", content: "价格" },
-              placeholder: { tag: "plain_text", content: "请输入实付金额，如 39.90" },
-              default_value: f["价格"] == null ? "" : String(f["价格"]),
-            },
-            {
-              tag: "markdown",
-              element_id: "expenseDateLabel",
-              content: "**消费日期（必选）**",
-              margin: "8px 0 0 0",
-            },
-            {
-              tag: "date_picker", name: "expense_date", required: true, width: "fill",
-              initial_date: date,
-            },
-            {
-              tag: "input", name: "payment", width: "fill",
-              label: { tag: "plain_text", content: "支付方式" },
-              placeholder: { tag: "plain_text", content: "例如：微信支付、支付宝、银行卡" },
-              default_value: String(f["支付方式"] || ""),
-            },
-            {
-              tag: "button", name: "submit_expense", form_action_type: "submit",
-              text: { tag: "plain_text", content: "确认入账" },
-              type: "primary_filled", width: "fill",
-              confirm: {
-                title: { tag: "plain_text", content: "确认写入表格？" },
-                text: { tag: "plain_text", content: "确认后将把当前内容和附件写入报销表。" },
-              },
-            },
-            {
-              tag: "button", name: "cancel_expense", form_action_type: "submit",
-              text: { tag: "plain_text", content: "取消本次录入" },
-              type: "default", width: "fill",
-            },
-          ],
-        },
-      ],
-    },
+    product,
+    price,
+    expense_date: String(form.expense_date || fallback.expense_date || currentDate()).slice(0, 10),
+    payment_method: String(form.payment_method || "").trim(),
   };
 }
 
-function statusCard(status, detail, success = false) {
-  return {
-    schema: "2.0",
-    config: { update_multi: true, width_mode: "default", summary: { content: status } },
-    header: {
-      title: { tag: "plain_text", content: status },
-      subtitle: { tag: "plain_text", content: detail },
-      template: success ? "green" : "grey",
-      icon: { tag: "standard_icon", token: "file-form_colorful" },
-      text_tag_list: [
-        { tag: "text_tag", text: { tag: "plain_text", content: success ? "已完成" : "已取消" }, color: success ? "green" : "grey" },
-      ],
-    },
-    body: {
-      direction: "vertical", padding: "12px 12px 20px 12px",
-      elements: [{ tag: "markdown", content: success ? "**记录已写入报销表。**" : "本次识别结果未写入表格。" }],
-    },
+async function submitOrder(workflow) {
+  const order = workflow.confirmedOrder;
+  const fields = {
+    "商品名称": order.product,
+    "价格": order.price,
+    "消费日期": `${order.expense_date} 00:00:00`,
+    "支付方式": order.payment_method,
   };
-}
-
-async function submit(pending) {
-  const missing = ["商品名称", "价格", "消费日期"].filter(name => !pending.fields[name]);
-  if (missing.length) throw new Error(`缺少必填字段：${missing.join("、")}`);
-  const fields = Object.fromEntries(FORM_FIELD_NAMES
-    .map(name => [name, pending.fields[name]])
+  const cleanFields = Object.fromEntries(FORM_FIELD_NAMES
+    .map(name => [name, fields[name]])
     .filter(([, value]) => value !== "" && value !== null && value !== undefined));
-  if (/^\d{4}-\d{2}-\d{2}$/.test(fields["消费日期"])) {
-    fields["消费日期"] = `${fields["消费日期"]} 00:00:00`;
-  }
-  const attachments = {};
-  if (pending.attachments.order.length) attachments["订单截图"] = pending.attachments.order.map(toRelative);
-  if (pending.attachments.invoice.length) attachments["发票文件"] = pending.attachments.invoice.map(toRelative);
+  const attachments = { "订单截图": workflow.originalPaths.map(toRelative) };
   return runJson([
     "base", "+form-submit", "--share-token", SHARE_TOKEN, "--base-token", BASE_TOKEN,
-    "--json", JSON.stringify({ fields, attachments }), "--as", "bot", "--yes",
+    "--json", JSON.stringify({ fields: cleanFields, attachments }), "--as", "bot", "--yes",
   ]);
 }
 
@@ -253,138 +192,217 @@ function toRelative(filePath) {
   return `./${path.relative(ROOT, filePath).split(path.sep).join("/")}`;
 }
 
-async function handleImage(event) {
-  const key = await getResourceKey(event);
-  if (!key) throw new Error("没有从消息中找到图片标识");
-  const filePath = await downloadResource(event, key);
-  const parsed = await recognizeExpense(filePath);
-  const pending = state.pending[event.sender_id] || {
-    fields: { "商品名称": "", "价格": null, "消费日期": "", "支付方式": "" },
-    attachments: { order: [], invoice: [] },
-    sourceMessageIds: [],
-  };
-  for (const [keyName, value] of Object.entries(parsed.fields)) {
-    if (value !== "" && value !== null && value !== undefined && value !== 0) {
-      pending.fields[keyName] = value;
-    }
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(pending.fields["消费日期"] || "")) {
-    pending.fields["消费日期"] = currentDate();
-  }
-  pending.attachments[parsed.kind].push(filePath);
-  pending.sourceMessageIds.push(event.message_id);
-  pending.updatedAt = new Date().toISOString();
-  state.pending[event.sender_id] = pending;
-  await saveState();
-  const sent = await replyCard(event.message_id, editCard(pending), "preview-card");
-  if (sent.message_id) state.cards[sent.message_id] = event.sender_id;
-  await saveState();
-}
-
-async function handleText(event) {
-  const text = event.content.trim();
-  const pending = state.pending[event.sender_id];
-  if (/^(帮助|help|使用说明)$/i.test(text)) {
-    await reply(event.message_id, "发送订单截图或发票图片，我会识别商品、价格、日期和支付方式。识别完成后可直接在交互卡片中修改、确认或取消。", "help");
-    return;
-  }
-  if (pending && /^(卡片|重新编辑)$/.test(text)) {
-    const sent = await replyCard(event.message_id, editCard(pending), "reopen-card");
-    if (sent.message_id) state.cards[sent.message_id] = event.sender_id;
+async function applyRecognition(workflow, result, { updateToken } = {}) {
+  workflow.documentType = result.documentType;
+  if (result.documentType === "order") {
+    workflow.orderDraft = result.order;
+    workflow.stage = STAGES.ORDER_REVIEW;
+    workflow.originalPaths ||= [workflow.originalPath];
     await saveState();
-    return;
+    const card = orderReviewCard({ order: result.order, attachmentCount: workflow.originalPaths.length, today: currentDate() });
+    return updateToken ? updateCard(updateToken, card) : sendWorkflowCard(workflow, card, "order-review");
   }
-  await reply(event.message_id, "请发送订单截图或发票图片。识别完成后可直接在卡片中修改并确认。", "fallback");
+  if (result.documentType === "invoice") {
+    workflow.invoiceDraft = result.invoice;
+    workflow.confirmedInvoice = null;
+    workflow.stage = STAGES.INVOICE_REVIEW;
+    await saveState();
+    const card = invoiceReviewCard(result.invoice);
+    return updateToken ? updateCard(updateToken, card) : sendWorkflowCard(workflow, card, "invoice-review");
+  }
+  workflow.stage = STAGES.RECEIVED;
+  await saveState();
+  const card = documentTypeCard();
+  return updateToken ? updateCard(updateToken, card) : sendWorkflowCard(workflow, card, "document-type");
 }
 
-function parseFormValue(raw) {
-  if (!raw) return {};
-  if (typeof raw === "object") return raw;
-  return JSON.parse(raw);
+async function handleAttachment(event) {
+  const key = await getResourceKey(event);
+  if (!key) throw new Error("没有从消息中找到附件标识");
+  const localPath = await downloadResource(event, key);
+  const visual = await prepareVisualAttachment(localPath, RUNTIME);
+  const workflow = {
+    id: event.message_id,
+    senderId: event.sender_id,
+    messageId: event.message_id,
+    resourceKey: key,
+    originalPath: visual.originalPath,
+    imagePath: visual.imagePath,
+    sourceType: visual.sourceType,
+    documentType: "unknown",
+    invoiceDraft: null,
+    confirmedInvoice: null,
+    candidateRecordIds: [],
+    selectedRecordId: null,
+    stage: STAGES.CLASSIFYING,
+    createdAt: new Date().toISOString(),
+  };
+  addWorkflow(state, workflow);
+  await saveState();
+  const result = await recognizeDocument(visual.imagePath);
+  await applyRecognition(workflow, result);
 }
 
-function friendlyError(error) {
-  const message = String(error?.message || error);
-  if (message.includes("app_scope_not_applied") || message.includes("has not applied for the required scope")) {
-    return "机器人缺少附件上传权限。管理员开通“上传云文档素材”权限后，可在原卡片再次点击确认。";
+async function showInvoiceDecision(workflow, token) {
+  workflow.stage = STAGES.INVOICE_DUPLICATE_CHECK;
+  await saveState();
+  const startedAt = Date.now();
+  const result = await matchConfirmedInvoice(invoiceRepository, workflow.confirmedInvoice);
+  console.log(`[invoice] initial_match_duration_ms=${Date.now() - startedAt} result=${result.type}`);
+  if (result.type === "duplicate") return updateCard(token, duplicateCard(workflow.confirmedInvoice.invoice_number));
+  if (result.type === "none") {
+    workflow.stage = STAGES.INVOICE_NO_MATCH;
+    workflow.candidateRecordIds = [];
+    await saveState();
+    return updateCard(token, noMatchCard(workflow.confirmedInvoice));
   }
-  if (message.includes("unsupported datetime format")) {
-    return "消费日期格式不正确。机器人已保留本次数据，请在修复后重新确认。";
+  if (result.type === "multiple") {
+    workflow.stage = STAGES.INVOICE_SELECT_ORDER;
+    workflow.candidateRecordIds = result.candidates.map(candidate => candidate.recordId);
+    workflow.candidates = result.candidates;
+    await saveState();
+    return updateCard(token, candidateCard(workflow.confirmedInvoice, result.candidates));
   }
-  if (message.includes("Forbidden") || message.includes("access denied")) {
-    return "机器人没有目标表格或附件的访问权限，请检查应用权限和表格协作者设置。";
+  workflow.stage = STAGES.INVOICE_MATCHING;
+  await saveState();
+  return finishBinding(workflow, result.candidate.recordId, token, result.candidate);
+}
+
+async function finishBinding(workflow, recordId, token, candidate) {
+  try {
+    await bindConfirmedInvoice({ repository: invoiceRepository, workflow, recordId, persist: saveState });
+  } catch (error) {
+    if (error instanceof DuplicateInvoiceError) {
+      workflow.stage = STAGES.INVOICE_DUPLICATE_CHECK;
+      await saveState();
+      return updateCard(token, duplicateCard(workflow.confirmedInvoice.invoice_number));
+    }
+    throw error;
   }
-  return `提交失败：${message.slice(0, 500)}`;
+  const record = candidate || await invoiceRepository.getRecord(recordId, ["商品名称", "价格"]);
+  return updateCard(token, finishedCard({
+    product: record?.fields?.["商品名称"] || workflow.confirmedInvoice.items?.[0]?.name || workflow.confirmedInvoice.seller_name || "发票消费",
+    amount: record?.fields?.["价格"] ?? workflow.confirmedInvoice.total_amount,
+    invoiceNumber: workflow.confirmedInvoice.invoice_number,
+  }));
 }
 
 async function handleCardAction(event) {
   if (!event?.event_id || state.processed[event.event_id]) return;
-  state.processed[event.event_id] = new Date().toISOString();
-  const senderId = state.cards[event.message_id] || event.operator_id;
-  const pending = state.pending[senderId];
-  if (!pending) {
-    await updateCard(event.token, statusCard("记录已失效", "请重新发送图片"));
+  const workflow = workflowForCard(state, event);
+  if (!workflow) {
+    await updateCard(event.token, expiredCard());
+    state.processed[event.event_id] = new Date().toISOString();
     await saveState();
     return;
   }
-  if (event.action_name === "cancel_expense") {
-    delete state.pending[senderId];
-    delete state.cards[event.message_id];
-    await saveState();
-    await updateCard(event.token, statusCard("已取消录入", "没有写入表格"));
-    return;
-  }
-  if (event.action_name !== "submit_expense") return;
+  const action = event.action_name;
   const form = parseFormValue(event.form_value);
-  pending.fields = {
-    ...pending.fields,
-    "商品名称": String(form.product || "").trim(),
-    "价格": Number(String(form.price || "").replace(/[,，¥￥\s]/g, "")),
-    "消费日期": String(form.expense_date || pending.fields["消费日期"] || currentDate()).slice(0, 10),
-    "支付方式": String(form.payment || "").trim(),
-  };
-  if (!Number.isFinite(pending.fields["价格"]) || pending.fields["价格"] <= 0) {
-    throw new Error("价格必须是大于 0 的数字");
+
+  if (workflow.stage === STAGES.FINISHED) {
+    await updateCard(event.token, alreadyHandledCard());
+  } else if (workflow.stage === STAGES.CANCELLED) {
+    await updateCard(event.token, cancelledCard());
+  } else if ([ACTIONS.DOCUMENT_CANCEL, ACTIONS.ORDER_CANCEL, ACTIONS.INVOICE_CANCEL].includes(action)) {
+    workflow.stage = STAGES.CANCELLED;
+    await saveState();
+    await updateCard(event.token, cancelledCard());
+  } else if (action === ACTIONS.DOCUMENT_CHOOSE_ORDER || action === ACTIONS.DOCUMENT_CHOOSE_INVOICE) {
+    const documentType = action === ACTIONS.DOCUMENT_CHOOSE_ORDER ? "order" : "invoice";
+    workflow.stage = documentType === "invoice" ? STAGES.INVOICE_PARSING : STAGES.CLASSIFYING;
+    await saveState();
+    await applyRecognition(workflow, await parseDocumentAs(documentType, workflow.imagePath), { updateToken: event.token });
+  } else if (action === ACTIONS.ORDER_CONFIRM) {
+    if (workflow.stage === STAGES.FINISHED) return;
+    workflow.confirmedOrder = orderFromForm(form, workflow.orderDraft);
+    await saveState();
+    await submitOrder(workflow);
+    workflow.stage = STAGES.FINISHED;
+    workflow.finishedAt = new Date().toISOString();
+    await saveState();
+    await updateCard(event.token, orderFinishedCard(workflow.confirmedOrder));
+  } else if (action === ACTIONS.INVOICE_CONFIRM) {
+    workflow.confirmedInvoice = confirmedInvoiceFromForm(form, workflow.invoiceDraft);
+    console.log(`[invoice] confirmed number=${workflow.confirmedInvoice.invoice_number} amount=${workflow.confirmedInvoice.total_amount}`);
+    await saveState();
+    await showInvoiceDecision(workflow, event.token);
+  } else if (action === ACTIONS.INVOICE_EDIT_AGAIN) {
+    workflow.stage = STAGES.INVOICE_REVIEW;
+    await saveState();
+    await updateCard(event.token, invoiceReviewCard(workflow.confirmedInvoice || workflow.invoiceDraft));
+  } else if (action === ACTIONS.INVOICE_SELECT_ORDER) {
+    const selected = String(form.selected_order || "");
+    if (!workflow.candidateRecordIds?.includes(selected)) throw new Error("请选择有效的订单");
+    console.log(`[invoice] selected_record_id=${selected}`);
+    await finishBinding(workflow, selected, event.token, workflow.candidates?.find(candidate => candidate.recordId === selected));
+  } else if (action === ACTIONS.INVOICE_CREATE_ORDER) {
+    try {
+      await createOrderAndBind({ repository: invoiceRepository, workflow, persist: saveState });
+      const record = await invoiceRepository.getRecord(workflow.createdOrderId, ["商品名称", "价格"]);
+      await updateCard(event.token, finishedCard({
+        product: record?.fields?.["商品名称"] || workflow.confirmedInvoice.seller_name || "发票消费",
+        amount: record?.fields?.["价格"] ?? workflow.confirmedInvoice.total_amount,
+        invoiceNumber: workflow.confirmedInvoice.invoice_number,
+      }));
+    } catch (error) {
+      if (error instanceof DuplicateInvoiceError) {
+        workflow.stage = STAGES.INVOICE_DUPLICATE_CHECK;
+        await saveState();
+        await updateCard(event.token, duplicateCard(workflow.confirmedInvoice.invoice_number));
+      } else throw error;
+    }
+  } else {
+    return;
   }
+
+  state.processed[event.event_id] = new Date().toISOString();
+  if (Object.keys(state.processed).length > 2000) state.processed = Object.fromEntries(Object.entries(state.processed).slice(-1000));
   await saveState();
-  await submit(pending);
-  delete state.pending[senderId];
-  delete state.cards[event.message_id];
-  await saveState();
-  await updateCard(event.token, statusCard("入账成功", `${pending.fields["商品名称"]} · ¥${pending.fields["价格"]}`, true));
 }
 
-if (process.argv.includes("--resend-pending")) {
-  for (const [senderId, pending] of Object.entries(state.pending)) {
-    const sourceMessageId = pending.sourceMessageIds?.at(-1);
-    if (!sourceMessageId) continue;
-    const sent = await replyCard(sourceMessageId, editCard(pending), "card-upgrade");
-    if (sent.message_id) state.cards[sent.message_id] = senderId;
+async function handleText(event) {
+  if (/^(帮助|help|使用说明)$/i.test(event.content.trim())) {
+    await reply(event.message_id, "发送订单截图、支付截图、发票图片或 PDF。机器人会先判断类型，再显示对应确认卡片。", "help");
+  } else {
+    await reply(event.message_id, "请发送订单或发票的图片/PDF。", "fallback");
   }
-  await saveState();
-  console.log("已为待确认记录发送交互卡片。");
-  process.exit(0);
+}
+
+function friendlyError(error) {
+  const message = String(error?.message || error);
+  if (message.includes("视觉模型")) return "附件识别失败，请重新发送或稍后重试。";
+  if (message.includes("发票号码")) return message;
+  if (message.includes("Forbidden") || message.includes("access denied")) return "机器人没有目标表格或附件的访问权限。";
+  return `处理失败：${message.slice(0, 500)}`;
 }
 
 async function handleEvent(event) {
   if (!event?.message_id || event.sender_type === "bot" || event.chat_type !== "p2p") return;
   if (state.processed[event.message_id]) return;
-  state.processed[event.message_id] = new Date().toISOString();
-  if (Object.keys(state.processed).length > 2000) {
-    state.processed = Object.fromEntries(Object.entries(state.processed).slice(-1000));
-  }
-  await saveState();
   try {
-    if (event.message_type === "image") await handleImage(event);
+    if (["image", "file"].includes(event.message_type)) await handleAttachment(event);
     else if (event.message_type === "text") await handleText(event);
-    else await reply(event.message_id, "目前支持图片和文字指令。请发送订单截图或发票图片。", "unsupported");
+    else await reply(event.message_id, "目前支持图片、PDF 和文字指令。", "unsupported");
+    state.processed[event.message_id] = new Date().toISOString();
+    await saveState();
   } catch (error) {
     console.error(`[event ${event.message_id}]`, error);
-    await reply(event.message_id, `处理失败：${String(error.message || error).slice(0, 500)}`, "error").catch(console.error);
+    await reply(event.message_id, friendlyError(error), "error").catch(console.error);
   }
 }
 
-console.log("飞书报销机器人启动中……");
+if (process.argv.includes("--resend-pending")) {
+  for (const workflow of Object.values(state.pending)) {
+    if (!workflow?.messageId) continue;
+    if (workflow.stage === STAGES.ORDER_REVIEW) await sendWorkflowCard(workflow, orderReviewCard({ order: workflow.confirmedOrder || workflow.orderDraft, attachmentCount: workflow.originalPaths?.length || 1, today: currentDate() }), "order-resend");
+    if (workflow.stage === STAGES.INVOICE_REVIEW) await sendWorkflowCard(workflow, invoiceReviewCard(workflow.confirmedInvoice || workflow.invoiceDraft), "invoice-resend");
+    if (workflow.stage === STAGES.RECEIVED && workflow.documentType === "unknown") await sendWorkflowCard(workflow, documentTypeCard(), "type-resend");
+  }
+  console.log("已重发待确认卡片。");
+  process.exit(0);
+}
+
+console.log("飞书订单与发票机器人启动中……");
 const consumers = [];
 let shuttingDown = false;
 function startConsumer(eventKey, handler) {
@@ -409,9 +427,7 @@ function startConsumer(eventKey, handler) {
     console.error(`${eventKey} 监听已退出，状态码 ${code}`);
     if (!shuttingDown) {
       shuttingDown = true;
-      for (const sibling of consumers) {
-        if (sibling !== consumer && !sibling.killed) sibling.kill("SIGTERM");
-      }
+      for (const sibling of consumers) if (sibling !== consumer && !sibling.killed) sibling.kill("SIGTERM");
       setTimeout(() => process.exit(code || 1), 500).unref();
     }
   });

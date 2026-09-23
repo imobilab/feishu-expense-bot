@@ -15,9 +15,16 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       RECOGNITION_MODE: ${RECOGNITION_MODE:-vision}
       VISION_PROVIDER: ${VISION_PROVIDER:-qwen}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_MODEL: ${VISION_MODEL:-qwen3.5-flash}
+      VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      VISION_TIMEOUT_MS: ${VISION_TIMEOUT_MS:-60000}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       QWEN_MODEL: ${QWEN_MODEL:-qwen2.5-vl-7b-instruct}
       QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      FEISHU_TABLE_ID: ${FEISHU_TABLE_ID:-tblY8EcAIKPHLIIu}
+      FEISHU_INVOICE_NUMBER_FIELD: ${FEISHU_INVOICE_NUMBER_FIELD:-发票号码}
+      FEISHU_INVOICE_ATTACHMENT_FIELD: ${FEISHU_INVOICE_ATTACHMENT_FIELD:-发票文件}
       OCR_ENGINE: ${OCR_ENGINE:-tesseract}
       OCR_LANG: ${OCR_LANG:-chi_sim+eng}
     volumes:
