@@ -11,7 +11,7 @@ export function normalizeState(raw = {}) {
     if (pending[workflowId]) cards[cardMessageId] = workflowId;
   }
 
-  return { processed: raw.processed || {}, pending, cards };
+  return { processed: raw.processed || {}, pending, cards, processingReactions: raw.processingReactions || {} };
 }
 
 export function addWorkflow(state, workflow) {

@@ -29,6 +29,8 @@
       └─ unknown → 用户在卡片中选择订单或发票
 ```
 
+收到图片或文件后，机器人会在原消息上添加 `Typing` 表情；识别并回复卡片或错误消息后清除。表情 ID 会暂存于运行状态，意外重启时尝试补清除。该功能需要飞书应用的 `im:message.reactions:write_only` 权限。
+
 订单确认卡片中的消费日期是独立必选字段。模型没有识别到日期时，默认使用 `TZ` 对应时区的当天日期。
 
 发票识别草稿保存在 `invoiceDraft`。用户修改并提交卡片后生成 `confirmedInvoice`；查重、匹配、创建和绑定只读取 `confirmedInvoice`。
@@ -39,6 +41,7 @@
 src/
 ├── bot.mjs                       # 飞书事件、状态机和业务编排
 ├── workflow-state.mjs            # 按附件保存工作流并关联对应卡片
+├── processing-reaction.mjs       # 附件处理期间的表情添加与清除
 ├── actions.mjs                   # 卡片 action 与 stage 常量
 ├── attachments.mjs               # 图片检测与 PDF 首页渲染
 ├── vision-ocr.m                  # Apple Vision OCR 底层实现

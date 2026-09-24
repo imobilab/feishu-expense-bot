@@ -13,6 +13,7 @@ import {
   bindConfirmedInvoice, confirmedInvoiceFromForm, createOrderAndBind, DuplicateInvoiceError, matchConfirmedInvoice,
 } from "./invoice/workflow.mjs";
 import { orderFinishedCard, orderReviewCard } from "./order/cards.mjs";
+import { reactionDeleteArgs, withProcessingReaction } from "./processing-reaction.mjs";
 import { initializeRecognition, parseDocumentAs, recognizeDocument } from "./recognition/index.mjs";
 import { addWorkflow, linkCard, normalizeState, workflowForCard } from "./workflow-state.mjs";
 
@@ -376,18 +377,54 @@ function friendlyError(error) {
   return `处理失败：${message.slice(0, 500)}`;
 }
 
+async function rememberProcessingReaction(messageId, reactionId) {
+  state.processingReactions[messageId] = reactionId;
+  await saveState();
+}
+
+async function forgetProcessingReaction(messageId, reactionId) {
+  if (state.processingReactions[messageId] !== reactionId) return;
+  delete state.processingReactions[messageId];
+  await saveState();
+}
+
+async function clearStaleProcessingReactions() {
+  for (const [messageId, reactionId] of Object.entries(state.processingReactions)) {
+    try {
+      await runJson(reactionDeleteArgs(messageId, reactionId));
+      await forgetProcessingReaction(messageId, reactionId);
+    } catch (error) {
+      console.error(`[reaction ${messageId}] startup cleanup failed`, error);
+    }
+  }
+}
+
 async function handleEvent(event) {
   if (!event?.message_id || event.sender_type === "bot" || event.chat_type !== "p2p") return;
   if (state.processed[event.message_id]) return;
-  try {
-    if (["image", "file"].includes(event.message_type)) await handleAttachment(event);
-    else if (event.message_type === "text") await handleText(event);
-    else await reply(event.message_id, "目前支持图片、PDF 和文字指令。", "unsupported");
-    state.processed[event.message_id] = new Date().toISOString();
-    await saveState();
-  } catch (error) {
-    console.error(`[event ${event.message_id}]`, error);
-    await reply(event.message_id, friendlyError(error), "error").catch(console.error);
+  const work = async () => {
+    try {
+      if (["image", "file"].includes(event.message_type)) await handleAttachment(event);
+      else if (event.message_type === "text") await handleText(event);
+      else await reply(event.message_id, "目前支持图片、PDF 和文字指令。", "unsupported");
+      state.processed[event.message_id] = new Date().toISOString();
+      await saveState();
+    } catch (error) {
+      console.error(`[event ${event.message_id}]`, error);
+      await reply(event.message_id, friendlyError(error), "error").catch(console.error);
+    }
+  };
+  if (["image", "file"].includes(event.message_type)) {
+    await withProcessingReaction({
+      messageId: event.message_id,
+      runJson,
+      work,
+      onAdded: rememberProcessingReaction,
+      onRemoved: forgetProcessingReaction,
+      onError: (stage, error) => console.error(`[reaction ${event.message_id}] ${stage} failed`, error),
+    });
+  } else {
+    await work();
   }
 }
 
@@ -402,6 +439,7 @@ if (process.argv.includes("--resend-pending")) {
   process.exit(0);
 }
 
+await clearStaleProcessingReactions();
 console.log("飞书订单与发票机器人启动中……");
 const consumers = [];
 let shuttingDown = false;
