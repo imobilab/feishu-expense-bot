@@ -62,7 +62,7 @@ export async function bindConfirmedInvoice({ repository, workflow, recordId, per
   await persist();
 
   if (workflow.invoiceAttachmentUploadedTo !== recordId) {
-    await repository.uploadInvoice(recordId, workflow.originalPath);
+    await repository.uploadInvoice(recordId, workflow.invoiceUploadPath || workflow.originalPath);
     workflow.invoiceAttachmentUploadedTo = recordId;
     await persist();
   }

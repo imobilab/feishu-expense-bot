@@ -62,6 +62,22 @@ test("binding appends once and repeated finished action is idempotent", async ()
   assert.deepEqual(calls, { upload: 1, append: 1, duplicate: 2 });
 });
 
+test("invoice binding uploads the confirmed invoice's named copy", async () => {
+  let uploadedPath;
+  const repository = {
+    findDuplicate: async () => null,
+    uploadInvoice: async (_recordId, filePath) => { uploadedPath = filePath; },
+    appendInvoiceNumber: async () => {},
+  };
+  const workflow = {
+    stage: STAGES.INVOICE_MATCHING, confirmedInvoice: draft,
+    originalPath: "/app/runtime/uploads/original.pdf",
+    invoiceUploadPath: "/app/runtime/named/om_test/0/11.00-游子越-USB Hub.pdf",
+  };
+  await bindConfirmedInvoice({ repository, workflow, recordId: "r1" });
+  assert.equal(uploadedPath, workflow.invoiceUploadPath);
+});
+
 test("final duplicate check prevents invoice number write", async () => {
   let duplicateCall = 0;
   let append = 0;

@@ -4,6 +4,7 @@ import path from "node:path";
 import readline from "node:readline";
 
 import { ACTIONS, STAGES } from "./actions.mjs";
+import { prepareNamedAttachment } from "./attachment-name.mjs";
 import { prepareVisualAttachment } from "./attachments.mjs";
 import {
   alreadyHandledCard, candidateCard, cancelledCard, documentTypeCard, duplicateCard, expiredCard, finishedCard, invoiceReviewCard, noMatchCard,
@@ -171,8 +172,26 @@ function orderFromForm(form, fallback) {
   };
 }
 
+async function ensureSubmitterName(workflow) {
+  if (workflow.submitterName) return workflow.submitterName;
+  const data = await runJson([
+    "im", "+messages-mget", "--message-id", workflow.messageId, "--as", "bot", "--no-reactions",
+  ]);
+  const message = data.messages?.find(item => item.message_id === workflow.messageId);
+  const name = String(message?.sender?.name || "").trim();
+  if (!name) throw new Error("无法获取提交人姓名，附件未上传；请重新提交原文件");
+  workflow.submitterName = name;
+  await saveState();
+  return name;
+}
+
 async function submitOrder(workflow) {
   const order = workflow.confirmedOrder;
+  const submitterName = await ensureSubmitterName(workflow);
+  const namedPaths = await Promise.all(workflow.originalPaths.map((sourcePath, index) => prepareNamedAttachment({
+    sourcePath, runtimeDir: RUNTIME, messageId: workflow.messageId, index,
+    amount: order.price, submitterName, projectName: order.product,
+  })));
   const fields = {
     "商品名称": order.product,
     "价格": order.price,
@@ -182,7 +201,7 @@ async function submitOrder(workflow) {
   const cleanFields = Object.fromEntries(FORM_FIELD_NAMES
     .map(name => [name, fields[name]])
     .filter(([, value]) => value !== "" && value !== null && value !== undefined));
-  const attachments = { "订单截图": workflow.originalPaths.map(toRelative) };
+  const attachments = { "订单截图": namedPaths.map(toRelative) };
   return runJson([
     "base", "+form-submit", "--share-token", SHARE_TOKEN, "--base-token", BASE_TOKEN,
     "--json", JSON.stringify({ fields: cleanFields, attachments }), "--as", "bot", "--yes",
@@ -191,6 +210,19 @@ async function submitOrder(workflow) {
 
 function toRelative(filePath) {
   return `./${path.relative(ROOT, filePath).split(path.sep).join("/")}`;
+}
+
+async function ensureNamedInvoiceAttachment(workflow) {
+  const invoice = workflow.confirmedInvoice;
+  if (!invoice) throw new Error("缺少用户确认后的发票数据");
+  const submitterName = await ensureSubmitterName(workflow);
+  const projectName = invoice.items?.find(item => String(item.name || "").trim())?.name
+    || invoice.seller_name || "发票项目";
+  workflow.invoiceUploadPath = await prepareNamedAttachment({
+    sourcePath: workflow.originalPath, runtimeDir: RUNTIME, messageId: workflow.messageId,
+    amount: invoice.total_amount, submitterName, projectName,
+  });
+  await saveState();
 }
 
 async function applyRecognition(workflow, result, { updateToken } = {}) {
@@ -271,6 +303,7 @@ async function showInvoiceDecision(workflow, token) {
 
 async function finishBinding(workflow, recordId, token, candidate) {
   try {
+    await ensureNamedInvoiceAttachment(workflow);
     await bindConfirmedInvoice({ repository: invoiceRepository, workflow, recordId, persist: saveState });
   } catch (error) {
     if (error instanceof DuplicateInvoiceError) {
@@ -338,6 +371,7 @@ async function handleCardAction(event) {
     await finishBinding(workflow, selected, event.token, workflow.candidates?.find(candidate => candidate.recordId === selected));
   } else if (action === ACTIONS.INVOICE_CREATE_ORDER) {
     try {
+      await ensureNamedInvoiceAttachment(workflow);
       await createOrderAndBind({ repository: invoiceRepository, workflow, persist: saveState });
       const record = await invoiceRepository.getRecord(workflow.createdOrderId, ["商品名称", "价格"]);
       await updateCard(event.token, finishedCard({
