@@ -4,7 +4,9 @@ const dateString = z.string().refine(
   value => value === "" || /^\d{4}-\d{2}-\d{2}$/.test(value),
   "日期必须为空字符串或 YYYY-MM-DD",
 );
-const amount = z.number().finite().nonnegative().nullable();
+const amount = z.number().finite().nonnegative("金额必须大于等于 0").nullable();
+// Discount rows may be negative; summary amounts still use the nonnegative schema.
+const lineAmount = z.number().finite().nullable();
 
 export const classifierSchema = z.object({
   document_type: z.enum(["order", "invoice", "unknown"]),
@@ -19,7 +21,7 @@ export const orderSchema = z.object({
 
 export const invoiceItemSchema = z.object({
   name: z.string(),
-  amount,
+  amount: lineAmount,
 }).strict();
 
 export const invoiceSchema = z.object({

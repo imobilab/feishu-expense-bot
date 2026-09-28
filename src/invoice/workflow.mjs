@@ -32,7 +32,7 @@ export function confirmedInvoiceFromForm(form, draft) {
     items: Array.isArray(draft?.items) ? draft.items : [],
   };
   const parsed = invoiceSchema.safeParse(candidate);
-  if (!parsed.success) throw new Error(`发票字段格式错误：${parsed.error.issues.map(issue => issue.message).join("；")}`);
+  if (!parsed.success) throw new Error(`发票字段格式错误：${parsed.error.issues.map(issue => `${issue.path.join(".") || "$"}：${issue.message}`).join("；")}`);
   if (!parsed.data.invoice_number) throw new Error("发票号码不能为空");
   if (moneyToCents(parsed.data.total_amount) === null) throw new Error("价税合计不能为空且必须是有效金额");
   return parsed.data;

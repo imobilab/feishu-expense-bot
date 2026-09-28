@@ -73,8 +73,19 @@ export async function callVisionModel({ imagePath, systemPrompt, schema, client,
       });
       const raw = completion.choices?.[0]?.message?.content;
       if (typeof raw !== "string" || !raw.trim()) throw new Error("视觉模型返回了空响应");
-      const parsed = schema.safeParse(extractJson(raw));
-      if (!parsed.success) throw new Error(`视觉模型 JSON Schema 校验失败：${parsed.error.issues.map(issue => issue.message).join("；")}`);
+      const data = extractJson(raw);
+      const parsed = schema.safeParse(data);
+      if (!parsed.success) {
+        const details = parsed.error.issues.map(issue => {
+          const field = issue.path.map((part, index) => typeof part === "number"
+            ? `[${part}]`
+            : `${index ? "." : ""}${String(part)}`).join("") || "$";
+          const value = issue.path.reduce((current, key) => current?.[key], data);
+          const numericValue = typeof value === "number" ? `（返回值：${value}）` : "";
+          return `${field}${numericValue}：${issue.message}`;
+        }).join("；");
+        throw new Error(`视觉模型 JSON Schema 校验失败：${details}`);
+      }
       console.log(`[vision] model=${settings.model} duration_ms=${Date.now() - startedAt} attempt=${attempt + 1}`);
       return { data: parsed.data, raw };
     } catch (error) {
