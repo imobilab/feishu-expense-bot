@@ -33,25 +33,21 @@ export function documentTypeCard() {
 }
 
 export function invoiceReviewCard(invoice) {
-  const items = invoice.items?.length
-    ? invoice.items.map(item => `- ${item.name || "未命名项目"}${item.amount == null ? "" : ` ¥${item.amount.toFixed(2)}`}`).join("\n")
-    : "- 未识别到商品项目";
   const datePicker = invoice.invoice_date
     ? { tag: "date_picker", name: "invoice_date", width: "fill", initial_date: invoice.invoice_date }
     : { tag: "date_picker", name: "invoice_date", width: "fill", placeholder: { tag: "plain_text", content: "请选择开票日期" } };
-  return baseCard("发票识别结果", "请检查并修改；确认后系统将尝试匹配已有订单", [
+  return baseCard("发票识别结果", "请核对含税总额与买方税号；确认后按总额匹配订单", [
     form("invoice_review_form", [
+      { tag: "input", name: "total_amount", required: true, width: "fill", label: { tag: "plain_text", content: "价税合计（含税总额）" }, default_value: amountValue(invoice.total_amount) },
+      { tag: "input", name: "buyer_tax_id", width: "fill", label: { tag: "plain_text", content: "购买方税号" }, default_value: invoice.buyer_tax_id || "" },
+      { tag: "input", name: "seller_tax_id", width: "fill", label: { tag: "plain_text", content: "销售方税号" }, default_value: invoice.seller_tax_id || "" },
       { tag: "input", name: "invoice_number", required: true, width: "fill", label: { tag: "plain_text", content: "发票号码" }, default_value: invoice.invoice_number || "" },
       { tag: "markdown", element_id: "invoiceDateLabel", content: "**开票日期**" },
       datePicker,
       { tag: "input", name: "buyer_name", width: "fill", label: { tag: "plain_text", content: "购买方名称" }, default_value: invoice.buyer_name || "" },
-      { tag: "input", name: "buyer_tax_id", width: "fill", label: { tag: "plain_text", content: "购买方税号" }, default_value: invoice.buyer_tax_id || "" },
       { tag: "input", name: "seller_name", width: "fill", label: { tag: "plain_text", content: "销售方名称" }, default_value: invoice.seller_name || "" },
-      { tag: "input", name: "seller_tax_id", width: "fill", label: { tag: "plain_text", content: "销售方税号" }, default_value: invoice.seller_tax_id || "" },
       { tag: "input", name: "amount_without_tax", width: "fill", label: { tag: "plain_text", content: "未税金额" }, default_value: amountValue(invoice.amount_without_tax) },
       { tag: "input", name: "tax_amount", width: "fill", label: { tag: "plain_text", content: "税额" }, default_value: amountValue(invoice.tax_amount) },
-      { tag: "input", name: "total_amount", required: true, width: "fill", label: { tag: "plain_text", content: "价税合计" }, default_value: amountValue(invoice.total_amount) },
-      { tag: "markdown", content: `**识别到的项目**\n${items}` },
       button(ACTIONS.INVOICE_CONFIRM, "确认并匹配", "primary_filled"),
       button(ACTIONS.INVOICE_CANCEL, "取消"),
     ]),

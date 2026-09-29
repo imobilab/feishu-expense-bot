@@ -75,7 +75,25 @@ test("negative invoice summaries and negative order prices remain invalid", () =
   }, invoice), /total_amount/);
 });
 
-test("vision validation errors include nested field paths and returned numeric values", async t => {
+test("invoice recognition and confirmation retain totals and tax IDs when item details are unavailable", async t => {
+  const imagePath = await sampleImage(t);
+  for (const items of [undefined, null, {}, [{ name: "项目", amount: "unknown" }]]) {
+    const data = { ...invoice, buyer_tax_id: "BUYER123", seller_tax_id: "SELLER456", items };
+    let calls = 0;
+    const client = { chat: { completions: { create: async () => ({
+      choices: [{ message: { content: JSON.stringify(++calls === 1 ? { document_type: "invoice" } : data) } }],
+    }) } } };
+    const result = await recognizeDocument(imagePath, { client, retries: 0 });
+    const confirmed = confirmedInvoiceFromForm(result.invoice, result.invoice);
+    assert.equal(calls, 2);
+    assert.equal(confirmed.total_amount, 6.8);
+    assert.equal(confirmed.buyer_tax_id, "BUYER123");
+    assert.equal(confirmed.seller_tax_id, "SELLER456");
+    assert.deepEqual(confirmed.items, []);
+  }
+});
+
+test("invoice validation errors report critical amounts while malformed auxiliary items are ignored", async t => {
   const imagePath = await sampleImage(t);
   const invalid = {
     ...invoice, total_amount: -6.8,
@@ -88,7 +106,7 @@ test("vision validation errors include nested field paths and returned numeric v
     imagePath, systemPrompt: "test", schema: invoiceSchema, client, retries: 0,
   }), error => {
     assert.match(error.message, /total_amount（返回值：-6\.8）：金额必须大于等于 0/);
-    assert.match(error.message, /items\[1\]\.amount/);
+    assert.doesNotMatch(error.message, /items/);
     assert.doesNotMatch(error.message, /buyer_name|seller_name|DISCOUNT-1/);
     return true;
   });

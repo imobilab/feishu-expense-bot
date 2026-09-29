@@ -4,11 +4,13 @@ import path from "node:path";
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
     child.stderr.on("data", chunk => { stderr += chunk; });
     child.on("error", reject);
-    child.on("close", code => code === 0 ? resolve() : reject(new Error(`${command} exited ${code}: ${stderr}`)));
+    child.on("close", code => code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}: ${stderr}`)));
   });
 }
 
@@ -26,9 +28,13 @@ export async function prepareVisualAttachment(filePath, runtimeDir) {
   if (type === "image") return { originalPath: filePath, imagePath: filePath, sourceType: "image" };
   if (type !== "pdf") throw new Error("目前只支持图片和 PDF 文件");
 
+  const info = await run("pdfinfo", [filePath]);
+  const pageCount = Number(info.match(/^Pages:\s+(\d+)\s*$/m)?.[1]);
+  if (!Number.isSafeInteger(pageCount) || pageCount < 1) throw new Error("无法确定 PDF 页数，不能识别最后一页");
   const previewDir = path.join(runtimeDir, "previews");
   await mkdir(previewDir, { recursive: true });
-  const outputBase = path.join(previewDir, path.basename(filePath).replace(/[^A-Za-z0-9_-]/g, "_") + "-page");
-  await run("pdftoppm", ["-f", "1", "-singlefile", "-png", "-r", "180", filePath, outputBase]);
-  return { originalPath: filePath, imagePath: `${outputBase}.png`, sourceType: "pdf" };
+  const outputBase = path.join(previewDir, path.basename(filePath).replace(/[^A-Za-z0-9_-]/g, "_") + `-page-${pageCount}`);
+  await run("pdftoppm", ["-f", String(pageCount), "-l", String(pageCount), "-singlefile", "-png", "-r", "180", filePath, outputBase]);
+  console.log(`[attachment] pdf_pages=${pageCount} recognition_page=${pageCount}`);
+  return { originalPath: filePath, imagePath: `${outputBase}.png`, sourceType: "pdf", pageCount, pageNumber: pageCount };
 }

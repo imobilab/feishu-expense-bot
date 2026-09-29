@@ -46,7 +46,7 @@ src/
 ├── processing-reaction.mjs       # 附件处理期间的表情添加与清除
 ├── attachment-name.mjs           # 上传附件的金额、提交人、项目命名
 ├── actions.mjs                   # 卡片 action 与 stage 常量
-├── attachments.mjs               # 图片检测与 PDF 首页渲染
+├── attachments.mjs               # 图片检测与 PDF 最后一页渲染
 ├── providers/
 │   └── qwen.mjs                  # OpenAI 兼容视觉模型调用、Base64、JSON 与 Schema 校验
 ├── recognition/
@@ -103,11 +103,13 @@ TZ=Asia/Shanghai
 
 ## Vision 调用
 
-`callVisionModel()` 负责读取图片、识别 JPEG/PNG/WebP MIME、生成 Base64 Data URL、调用 OpenAI 兼容接口、提取 JSON 并使用 Zod 校验。请求失败、JSON 无效或 Schema 不匹配时会自动重试一次。PDF 使用 `pdftoppm` 将第一页渲染为 PNG，再交给视觉模型；原始 PDF 会作为发票附件保存。
+`callVisionModel()` 负责读取图片、识别 JPEG/PNG/WebP MIME、生成 Base64 Data URL、调用 OpenAI 兼容接口、提取 JSON 并使用 Zod 校验。请求失败、JSON 无效或 Schema 不匹配时会自动重试一次。PDF 使用 `pdfinfo` 获取页数，再使用 `pdftoppm` 将最后一页渲染为 PNG，交给视觉模型；单页 PDF 识别其唯一页面，原始完整 PDF 会作为附件保存。
 
-模型异常不会写入多维表格，也不会导致事件监听进程退出。Schema 校验错误会显示字段路径（例如 `items[1].amount`），数值字段还会显示模型返回的数值；不记录完整模型响应。
+模型异常不会写入多维表格，也不会导致事件监听进程退出。Schema 校验错误会显示字段路径（例如 `total_amount`），数值字段还会显示模型返回的数值；不记录完整模型响应。
 
 发票明细允许负数折扣/优惠行，识别和确认时保留原始符号。未税合计、税额合计、价税合计及订单价格仍须为非负金额；订单匹配只使用票面最终价税合计，不会再次扣减折扣。
+
+发票识别和确认重点是价税合计（含税总额）、购买方税号和销售方税号，卡片优先展示这些字段。商品明细仅作为附件命名和新订单名称的辅助信息；缺失或格式异常时使用空数组，不阻断关键字段确认，名称缺失时回退到销售方或默认名称。卡片不展示逐行商品明细，发票号码查重及其他可编辑字段继续保留。
 
 ## 发票匹配与幂等
 
@@ -121,6 +123,8 @@ TZ=Asia/Shanghai
 运行状态、待确认数据和已处理事件保存在 `runtime/state.json`。
 
 ## 本地检查
+
+本地 PDF 回归测试需要 Poppler 的 `pdfinfo` 和 `pdftoppm`；Docker 镜像已包含它们。
 
 ```bash
 npm ci
@@ -177,6 +181,6 @@ ssh siman@dogserver 'cd /home/siman/feishu-expense-bot && docker compose up -d'
 
 - 只处理机器人私聊。
 - 每个附件有独立工作流和确认卡片；同一用户可以连续发送并分别处理多张订单或发票。
-- PDF V1 只识别第一页。
-- 商品项目在发票卡片中展示，V1 不提供逐行编辑。
+- PDF 只识别最后一页；其他页面不提取信息，完整原文件保留。
+- 发票重点核对含税总额和买卖方税号，商品明细不要求用户逐行确认。
 - 发票号并发去重依赖写入前的二次查询和单实例事件队列；多实例部署不受支持。

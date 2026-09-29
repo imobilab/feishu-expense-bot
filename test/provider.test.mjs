@@ -44,3 +44,16 @@ test("vision provider rejects invalid model JSON after retry", async () => {
     /Schema 校验失败/,
   );
 });
+
+test("vision schema errors identify nested field paths and returned numeric values", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "vision-provider-"));
+  const imagePath = path.join(dir, "sample.jpg");
+  await writeFile(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const client = { chat: { completions: { create: async () => ({
+    choices: [{ message: { content: '{"entries":[{"amount":-1}]}' } }],
+  }) } } };
+  await assert.rejects(callVisionModel({
+    imagePath, systemPrompt: "test", client, retries: 0,
+    schema: z.object({ entries: z.array(z.object({ amount: z.number().nonnegative() })) }),
+  }), /entries\[0\]\.amount（返回值：-1）/);
+});

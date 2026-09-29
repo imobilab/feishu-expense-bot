@@ -34,5 +34,6 @@ export const invoiceSchema = z.object({
   amount_without_tax: amount,
   tax_amount: amount,
   total_amount: amount,
-  items: z.array(invoiceItemSchema),
+  // Item details are auxiliary; unavailable or malformed details must not block totals and tax IDs.
+  items: z.array(invoiceItemSchema).catch([]),
 }).strict();
