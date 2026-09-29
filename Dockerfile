@@ -8,8 +8,6 @@ RUN apt-get update \
       ca-certificates \
       curl \
       poppler-utils \
-      tesseract-ocr \
-      tesseract-ocr-chi-sim \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@larksuite/cli@${LARK_CLI_VERSION}" \
     && npm cache clean --force
@@ -29,8 +27,7 @@ RUN chmod 755 ./docker-entrypoint.sh \
 USER node
 
 ENV NODE_ENV=production \
-    TZ=Asia/Shanghai \
-    OCR_LANG=chi_sim+eng
+    TZ=Asia/Shanghai
 
 VOLUME ["/app/runtime", "/home/node/.lark-cli"]
 

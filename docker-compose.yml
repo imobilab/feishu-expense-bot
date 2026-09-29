@@ -25,8 +25,6 @@ services:
       FEISHU_TABLE_ID: ${FEISHU_TABLE_ID:-tblY8EcAIKPHLIIu}
       FEISHU_INVOICE_NUMBER_FIELD: ${FEISHU_INVOICE_NUMBER_FIELD:-发票号码}
       FEISHU_INVOICE_ATTACHMENT_FIELD: ${FEISHU_INVOICE_ATTACHMENT_FIELD:-发票文件}
-      OCR_ENGINE: ${OCR_ENGINE:-tesseract}
-      OCR_LANG: ${OCR_LANG:-chi_sim+eng}
     volumes:
       - bot-data:/app/runtime
       - lark-cli-config:/home/node/.lark-cli

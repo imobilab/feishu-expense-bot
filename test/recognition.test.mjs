@@ -4,7 +4,27 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { recognizeDocument } from "../src/recognition/index.mjs";
+import { initializeRecognition, recognizeDocument } from "../src/recognition/index.mjs";
+
+test("recognition startup accepts vision and rejects removed modes", async t => {
+  const originalMode = process.env.RECOGNITION_MODE;
+  const originalProvider = process.env.VISION_PROVIDER;
+  t.after(() => {
+    if (originalMode === undefined) delete process.env.RECOGNITION_MODE;
+    else process.env.RECOGNITION_MODE = originalMode;
+    if (originalProvider === undefined) delete process.env.VISION_PROVIDER;
+    else process.env.VISION_PROVIDER = originalProvider;
+  });
+  process.env.VISION_PROVIDER = "qwen";
+  delete process.env.RECOGNITION_MODE;
+  await initializeRecognition();
+  process.env.RECOGNITION_MODE = " VISION ";
+  await initializeRecognition();
+  for (const mode of ["ocr", "hybrid"]) {
+    process.env.RECOGNITION_MODE = mode;
+    await assert.rejects(initializeRecognition(), /当前仅支持 vision/);
+  }
+});
 
 async function sampleImage() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "recognition-"));

@@ -47,18 +47,15 @@ src/
 ├── attachment-name.mjs           # 上传附件的金额、提交人、项目命名
 ├── actions.mjs                   # 卡片 action 与 stage 常量
 ├── attachments.mjs               # 图片检测与 PDF 首页渲染
-├── vision-ocr.m                  # Apple Vision OCR 底层实现
 ├── providers/
 │   └── qwen.mjs                  # OpenAI 兼容视觉模型调用、Base64、JSON 与 Schema 校验
 ├── recognition/
-│   ├── index.mjs                 # vision / ocr 路由
+│   ├── index.mjs                 # 视觉识别入口与订单 / 发票路由
 │   ├── classifier.mjs            # order / invoice / unknown 分类
 │   ├── order-parser.mjs          # 订单视觉解析
 │   ├── invoice-parser.mjs        # 正式发票视觉解析
 │   ├── prompts.mjs               # 三类独立系统提示词
-│   ├── schemas.mjs               # Zod 输出结构
-│   ├── ocr.mjs                   # 旧 OCR + 规则流程适配
-│   └── schema.mjs                # 旧订单字段规范化
+│   └── schemas.mjs               # Zod 输出结构
 ├── order/
 │   └── cards.mjs                 # 订单确认与完成卡片
 └── invoice/
@@ -95,13 +92,10 @@ VISION_API_KEY=sk-xxx
 VISION_MODEL=qwen3.5-flash
 VISION_TIMEOUT_MS=60000
 
-OCR_ENGINE=tesseract
-OCR_LANG=chi_sim+eng
 TZ=Asia/Shanghai
 ```
 
-- `RECOGNITION_MODE=vision`：先分类，再使用独立的订单或发票视觉提示词。
-- `RECOGNITION_MODE=ocr`：保留旧版 OCR + 规则订单流程，不启用发票流程。
+- `RECOGNITION_MODE=vision`：唯一支持的识别模式，先分类，再使用独立的订单或发票视觉提示词。其他模式会在启动时报错。
 - `VISION_MODEL` 可直接切换百炼兼容接口中的视觉模型。
 - `VISION_API_KEY`、飞书密钥和本地 `.env` 禁止提交到 Git。
 
@@ -140,7 +134,7 @@ docker compose build
 
 ## Docker Compose
 
-容器自带 Node.js、lark-cli、Tesseract 和 Poppler，无需开放 HTTP 端口。机器人通过 WebSocket 主动连接飞书。
+容器自带 Node.js、lark-cli 和 PDF 渲染所需的 Poppler，无需开放 HTTP 端口。机器人通过 WebSocket 主动连接飞书。
 
 ```bash
 docker compose up -d --build
