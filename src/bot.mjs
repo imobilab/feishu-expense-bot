@@ -16,6 +16,7 @@ import {
 import { orderFinishedCard, orderReviewCard } from "./order/cards.mjs";
 import { reactionDeleteArgs, withProcessingReaction } from "./processing-reaction.mjs";
 import { initializeRecognition, parseDocumentAs, recognizeDocument } from "./recognition/index.mjs";
+import { createTextCommandHandler } from "./text-commands.mjs";
 import { addWorkflow, linkCard, normalizeState, workflowForCard } from "./workflow-state.mjs";
 
 const ROOT = process.cwd();
@@ -66,6 +67,11 @@ const invoiceRepository = createInvoiceRepository({
   invoiceAttachmentField: process.env.FEISHU_INVOICE_ATTACHMENT_FIELD || "发票文件",
 });
 
+const handleText = createTextCommandHandler({
+  repository: invoiceRepository, runJson, reply, runtimeDir: RUNTIME, root: ROOT,
+  onError: (error, context) => console.error(`[reminder ${context.recordId}]`, error),
+});
+
 async function loadState() {
   try {
     return JSON.parse(await readFile(STATE_FILE, "utf8"));
@@ -107,11 +113,11 @@ async function getResourceKey(event) {
   return findResourceKey(data);
 }
 
-async function reply(messageId, text, suffix) {
+async function reply(messageId, text, suffix, { plainText = false } = {}) {
   const idempotency = `${messageId.replace(/[^A-Za-z0-9_-]/g, "").slice(-32)}-${suffix}`.slice(0, 50);
   await runJson([
     "im", "+messages-reply", "--message-id", messageId,
-    "--markdown", text, "--as", "bot", "--idempotency-key", idempotency,
+    plainText ? "--text" : "--markdown", text, "--as", "bot", "--idempotency-key", idempotency,
   ]);
 }
 
@@ -393,14 +399,6 @@ async function handleCardAction(event) {
   state.processed[event.event_id] = new Date().toISOString();
   if (Object.keys(state.processed).length > 2000) state.processed = Object.fromEntries(Object.entries(state.processed).slice(-1000));
   await saveState();
-}
-
-async function handleText(event) {
-  if (/^(帮助|help|使用说明)$/i.test(event.content.trim())) {
-    await reply(event.message_id, "发送订单截图、支付截图、发票图片或 PDF。机器人会先判断类型，再显示对应确认卡片。", "help");
-  } else {
-    await reply(event.message_id, "请发送订单或发票的图片/PDF。", "fallback");
-  }
 }
 
 function friendlyError(error) {

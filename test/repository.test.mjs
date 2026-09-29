@@ -90,3 +90,73 @@ test("attachment upload rejects files outside the project directory", async () =
   const repository = createInvoiceRepository({ runJson: async () => {}, baseToken: "base", tableId: "table" });
   await assert.rejects(repository.uploadInvoice("r1", "/tmp/invoice.pdf"), /必须位于机器人项目目录内/);
 });
+
+test("reminder queries every page and selects orders by missing invoice files", async () => {
+  const calls = [];
+  const fields = ["商品名称", "价格", "消费日期", "订单截图", "票据附件", "发票号码"];
+  const runJson = async args => {
+    calls.push(args);
+    const offset = Number(args[args.indexOf("--offset") + 1]);
+    if (offset === 0) return {
+      ...listResponse(fields, [
+        ["已有发票", 10, "", [{ file_token: "image-1" }], [{ file_token: "invoice-1" }], ""],
+        ["只有号码", 20, "", [{ file_token: "image-2" }], null, "INV-2"],
+      ], ["invoiced", "number-only"]), has_more: true,
+    };
+    return listResponse(fields, [
+      ["缺少截图", 30, "", [], [], ""],
+      ["", null, "", [], null, ""],
+      ["", null, "", [{ file_token: "image-3" }], [], ""],
+    ], ["missing-screenshot", "blank", "image-only"]);
+  };
+  const repository = createInvoiceRepository({ runJson, baseToken: "collect-base", tableId: "collect-table", invoiceAttachmentField: "票据附件" });
+  const records = await repository.findOrdersMissingInvoices();
+  assert.deepEqual(records.map(record => record.recordId), ["number-only", "missing-screenshot", "image-only"]);
+  assert.deepEqual(calls.map(args => args[args.indexOf("--offset") + 1]), ["0", "2"]);
+  for (const args of calls) {
+    assert.equal(args[args.indexOf("--limit") + 1], "200");
+    assert.equal(args[args.indexOf("--table-id") + 1], "collect-table");
+    assert.equal(args[args.indexOf("--as") + 1], "bot");
+    assert.ok(args.includes("票据附件"));
+    assert.ok(args.includes("+record-list"));
+  }
+});
+
+test("incomplete pagination and missing attachment columns cannot report all orders as uninvoiced", async () => {
+  const incomplete = createInvoiceRepository({
+    runJson: async () => ({ ...listResponse([], [], []), has_more: true }), baseToken: "base", tableId: "table",
+  });
+  await assert.rejects(incomplete.findOrdersMissingInvoices(), /分页结果不完整/);
+  const missingColumn = createInvoiceRepository({
+    runJson: async () => listResponse(["商品名称", "价格"], [["订单", 10]], ["r1"]), baseToken: "base", tableId: "table",
+  });
+  await assert.rejects(missingColumn.findOrdersMissingInvoices(), /未返回订单截图或发票文件字段/);
+});
+
+test("order screenshot download uses its record and file token and verifies the output path", async () => {
+  const outputPath = path.join(process.cwd(), "runtime", "reminders", "test", "image");
+  let command;
+  const repository = createInvoiceRepository({
+    runJson: async args => {
+      command = args;
+      return { downloaded: [{ file_token: "token-1", saved_path: outputPath }] };
+    }, baseToken: "collect-base", tableId: "collect-table",
+  });
+  await repository.downloadOrderAttachment("r1", "token-1", outputPath);
+  assert.ok(command.includes("+record-download-attachment"));
+  assert.equal(command[command.indexOf("--file-token") + 1], "token-1");
+  assert.equal(command[command.indexOf("--record-id") + 1], "r1");
+  assert.equal(command[command.indexOf("--table-id") + 1], "collect-table");
+  assert.equal(command[command.indexOf("--output") + 1], "./runtime/reminders/test/image");
+  assert.equal(command[command.indexOf("--as") + 1], "bot");
+});
+
+test("order attachment downloads reject paths outside the project and unexpected CLI output", async () => {
+  let calls = 0;
+  const repository = createInvoiceRepository({
+    runJson: async () => { calls += 1; return { downloaded: [] }; }, baseToken: "base", tableId: "table",
+  });
+  await assert.rejects(repository.downloadOrderAttachment("r1", "token", "/tmp/image.png"), /必须位于机器人项目目录内/);
+  assert.equal(calls, 0);
+  await assert.rejects(repository.downloadOrderAttachment("r1", "token", path.join(process.cwd(), "runtime", "image.png")), /未返回预期文件/);
+});
